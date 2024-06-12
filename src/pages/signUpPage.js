@@ -65,7 +65,7 @@ export function SignUpPage() {
                     case "digits":
                     return "Password must contain at least one digit.";
                     default:
-                    return "Password does not meet the requirements."; // Generic message
+                    return "Password does not meet the requirements."; 
                 }
                 });
             if (customErrorMessages.length === 0) {
@@ -75,7 +75,8 @@ export function SignUpPage() {
 
                     await setDoc(doc(db, "Users", user.uid), {
                         username: formData.username,
-                        chatActive: false
+                        chatActive: false,
+                        online: false
                     });
 
                     setTimeout(() => {
@@ -93,13 +94,11 @@ export function SignUpPage() {
     }
 
     return (
-        <Grid container sx = {{height: '100vh'}}>
+        <Grid container sx = {{height: '100vh', overflow: 'hidden'}}>
             <Grid item sm = {4} md={7} 
                 sx = {{
-                    backgroundImage: `url(https://source.unsplash.com/random?wallpapers)`, // Use the image in the background
-                    backgroundRepeat: "no-repeat",
-                    backgroundSize: "cover", // Or "contain" to fit the image without cropping
-                    backgroundPosition: "center", 
+                    backgroundColor: '#1876d2',
+                    height: '100vh' 
                 }}
             />
             
