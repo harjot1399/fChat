@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef} from 'react';
 import { 
   Box, 
   TextField, 
@@ -10,44 +10,46 @@ import {
   IconButton,
   Avatar,
   Typography,
-  Button
+  Button,
+  CircularProgress
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
-import { addDoc, collection, getDocs, Timestamp, setDoc, doc, updateDoc, deleteDoc, onSnapshot, getDoc, query, where, orderBy} from 'firebase/firestore';
+import { addDoc, collection, getDocs, Timestamp, setDoc, doc, updateDoc, deleteDoc, onSnapshot, getDoc, query, where, orderBy, runTransaction} from 'firebase/firestore';
 import {db, auth} from "../firebase"
 import LogoutIcon from '@mui/icons-material/Logout';
 import { signOut } from 'firebase/auth';
 import { useNavigate } from 'react-router-dom';
+import { Construction, NoiseAwareOutlined, Transcribe } from '@mui/icons-material';
 
 export function ChatScreen() {
   
-  const [users, setUsers] = useState([]);
   const loggedInID = localStorage.getItem('uid')
   const [randomUser, setRandomUser] = useState("")
   const [randomUserName, setRandomUserName] = useState("")
   const [activeChatId, setActiveChatId] = useState("")
   const [message, setMessage] = useState("")
   const [messages, setMessages] = useState([])
-  const [lastMatchedUser, setLastMatchedUser] = useState(null);
   const [noUsersFound, setNoUsersFound] = useState(false);
+  const [findingMatch, setFindingMatch] = useState(true); 
   const navigator = useNavigate()
+  const retryTimeoutRef = useRef(null);
 
   useEffect(() => {
-    const checkForUsers = async () => {
-      try {
-        await fetchUsersIdsExcluding();
-        if (users.length === 0){
-          setNoUsersFound(true)
-        } else{
-          startConversation()
-        } // Update noUsersFound
-      } catch (error) {
-        console.error('Error checking for users:', error);
-      }
-    }
+    const initiateSearch = async () => {
+      await addToQueue();
+      startMatching();
+    };
 
-    checkForUsers();
+    initiateSearch();
+
+    return () => {
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+      }
+    };
+
   }, []);
+
 
   useEffect(() => {
     if (activeChatId) {
@@ -65,93 +67,103 @@ export function ChatScreen() {
       });
 
       return () => unsubscribe();
+    } else {
+      const unsubscribe = onSnapshot(collection(db, 'Chats'), (snapshot) => {
+        snapshot.docChanges().forEach( async (change) => {
+          if (change.type === 'added') {
+            const newChat = change.doc.data();
+            if (newChat.participants.includes(loggedInID)) {
+              setActiveChatId(change.doc.id);
+              const matchedUserId = newChat.participants.find(id => id !== loggedInID);
+              setRandomUser(matchedUserId);
+            
+              
+              const randomDoc = doc(db, 'Users', matchedUserId); 
+            
+              const docSnap = await getDoc(randomDoc);
+              if (docSnap.exists()) {
+                setRandomUserName(docSnap.data().username);
+              } else {
+                console.log("No user found");
+              }
+            
+              setFindingMatch(false);
+              if (retryTimeoutRef.current) {
+                clearTimeout(retryTimeoutRef.current);
+                retryTimeoutRef.current = null;
+              }
+            }
+          }
+        });
+      });
+      return () => unsubscribe();
+
     }
-  }, [activeChatId]); 
-  
+  }, [activeChatId, loggedInID]); 
 
-  const fetchUsersIdsExcluding = async () => {
+
+  const addToQueue = async () => {
     try {
-      const userCollection = collection(db, 'Users');
-      const usersSnapshot = await getDocs(userCollection);
-      const userIds = usersSnapshot.docs.filter(doc => {
-        const data = doc.data();
-        return doc.id !== loggedInID && doc.id !== lastMatchedUser && data.chatActive === false && data.online === true;
-      }).map(doc => doc.id); // Extract the IDs after filtering
+      const queueRef = collection(db, 'JoinQueue');
+      const existingUserQuery = query(queueRef, where('userId', '==', loggedInID));
+      const existingUserSnapshot = await getDocs(existingUserQuery);
 
-      setUsers(userIds)
-    }catch(error){
-      console.log(error)
-    }
-  }
-
-  const getRandomUserIdExcluding = async () => {
-    try {
-        const randomIndex = Math.floor(Math.random() * users.length);
-        const randomUserId = users[randomIndex];
-        setRandomUser(randomUserId)
-        return randomUserId; 
+      if (existingUserSnapshot.empty) {
+        await addDoc(queueRef, { userId: loggedInID, timestamp: Timestamp.now()});
+      }
+      setFindingMatch(true)
     } catch (error) {
-        console.error('Error getting random user ID:', error);
-        throw error;
+      console.log(error);
     }
+  };
+
+  const startMatching = () => {
+    retryTimeoutRef.current = setTimeout(() => {
+      if (!activeChatId) {
+        removeFromQueue(); 
+        setFindingMatch(false);
+        setNoUsersFound(true);
+        console.log("The problem is happening here for the first time")
+      }
+    }, 15000);
   };
 
   const deleteChatSession = async (chatId) => {
     try {
-        const chatRef = doc(db, 'Chats', chatId);
-        await deleteDoc(chatRef);
-        console.log('Chat deleted with ID:', chatId);
+      const messagesRef = collection(db, 'Chats', chatId, 'Messages');
+      const messagesSnapshot = await getDocs(messagesRef);
+      messagesSnapshot.forEach(async (messageDoc) => {
+        await deleteDoc(messageDoc.ref);
+      });
+      const chatRef = doc(db, 'Chats', chatId);
+      await deleteDoc(chatRef);
+      setActiveChatId("");
     } catch (error) {
         console.error('Error deleting chat:', error);
     }
   };
 
-  const startConversation = async () => {
+  const removeFromQueue = async () => {
     try {
-      const newRandomUser = await getRandomUserIdExcluding();
-      const randomDoc = doc(db, 'Users', newRandomUser);
-      const docSnap = await getDoc(randomDoc);
-      if (docSnap.exists()) {
-        setRandomUserName(docSnap.data().username);
-      }
-  
-      
-      const existingChatQuery = query(collection(db, 'Chats'), where('participants', 'array-contains-any', [loggedInID, newRandomUser]));
-      const existingChatSnapshot = await getDocs(existingChatQuery);
-  
-      let chatCollection;
-      if (existingChatSnapshot.empty) {
-        if (activeChatId) {
-          await deleteChatSession(activeChatId);
-        }
-  
-        const newParticipants = [loggedInID, newRandomUser];
-  
-        chatCollection = await addDoc(collection(db, 'Chats'), {
-          participants: newParticipants,
-          createdAt: Timestamp.now(),
-          lastMessageAt: Timestamp.now()
-        });
-  
-        setActiveChatId(chatCollection.id);
-        setRandomUser(newRandomUser);
-        setLastMatchedUser(newRandomUser);
-      } else {
-        // If an existing chat session is found, use its ID
-        chatCollection = existingChatSnapshot.docs[0].ref;
-        setActiveChatId(chatCollection.id);
-        setRandomUser(newRandomUser);
-        setLastMatchedUser(newRandomUser);
+      const queueRef = collection(db, 'JoinQueue');
+      const existingUserQuery = query(queueRef, where('userId', '==', loggedInID));
+      const existingUserSnapshot = await getDocs(existingUserQuery);
+
+      if (!existingUserSnapshot.empty) {
+        const userDocRef = existingUserSnapshot.docs[0].ref;
+        await deleteDoc(userDocRef);
       }
     } catch (error) {
       console.log(error);
     }
   };
-  
+
+
+
 
   const addMessageToChatSession = async () => {
     try {
-      if (message.length !== 0){
+      if (message.length !== 0 && activeChatId){
         const messageRef = await addDoc(collection(db, 'Chats', activeChatId, 'Messages'), {
           sender: loggedInID,
           content: message,
@@ -172,17 +184,21 @@ export function ChatScreen() {
   }
 
   const handleNextButtonClick = async () => {
-    setNoUsersFound(false) // reset No User Found state
-    await fetchUsersIdsExcluding()
-    if(users.length > 0){
-      startConversation()
-    }else{
-      setNoUsersFound(true)
+    if (activeChatId){
+      await deleteChatSession(activeChatId)
+
     }
+    setFindingMatch(true);
+    setNoUsersFound(false);
+    await addToQueue();
+    startMatching();
   };
 
   const handleLogOut = async () =>{
     try{
+      if (activeChatId){
+        deleteChatSession(activeChatId)
+      }
       await signOut(auth)
       localStorage.removeItem('token')
       localStorage.removeItem('uid')
@@ -201,97 +217,117 @@ export function ChatScreen() {
 
   return (
     <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      {noUsersFound ? (
+      {findingMatch ? (
         <Box sx={{ 
-          display: 'flex', // Enable flexbox layout
-          justifyContent: 'center', // Center horizontally
-          alignItems: 'center', // Center vertically
-          flexDirection: 'column',
-          height: '100vh' // Optional: Ensure the parent takes full viewport height
+          display: 'flex', 
+          justifyContent: 'center', 
+          alignItems: 'center', 
+          height: '100vh',
+          backgroundColor: 'rgba(255, 255, 255, 0.8)', 
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100vw'
         }}>
-          <Typography variant="h6" align="center">No users available to chat with.</Typography>
-          <Button 
-            variant="contained" 
-            color="primary" 
-            sx={{ mt: 2 }} // Add some margin on top of the button
-            onClick={handleNextButtonClick}
-          >
-            Retry
-          </Button>
-          <Button 
-            variant="contained" 
-            color="primary" 
-            sx={{ mt: 2 }} // Add some margin on top of the button
-            onClick={handleLogOut}
-          >
-            Logout
-          </Button>
+          <CircularProgress size={60} />
         </Box>
       ) : (
         <>
-           <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', p: 2 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center' }}>
-              <Avatar alt="User Name" src="/path-to-avatar.jpg" /> {/* Add a path to the avatar image */}
-              <Typography variant="h6" sx={{ ml: 2 }}>{randomUserName}</Typography>
+          {noUsersFound ? (
+            <Box sx={{ 
+              display: 'flex', 
+              justifyContent: 'center', 
+              alignItems: 'center', 
+              flexDirection: 'column',
+              height: '100vh' 
+            }}>
+              <Typography variant="h6" align="center">No users available to chat with.</Typography>
+              <Button 
+                variant="contained" 
+                color="primary" 
+                sx={{ mt: 2 }} 
+                onClick={handleNextButtonClick}
+              >
+                Retry
+              </Button>
+              <Button 
+                variant="contained" 
+                color="primary" 
+                sx={{ mt: 2 }} 
+                onClick={handleLogOut}
+              >
+                Logout
+              </Button>
             </Box>
-            <Button variant="contained" color="primary" onClick={handleNextButtonClick}>
-              Next
-            </Button>
-          </Box>
-          <Divider /> {/* Visual separator */}
-
-          <Box sx={{ flex: 1, overflowY: 'auto', p: 2 }}> {/* Message display area */}
-            <List>
-              {messages.map((message, index) => (
-                <ListItem key={index} sx={{ display: 'block' }}> {/* Change to display: block */}
-                  <Box
-                    sx={{
-                      display: 'flex',
-                      justifyContent: message.sender === loggedInID ? 'flex-end' : 'flex-start',
-                      width: '100%', // Take full width of container
-                    }}
-                  >
-                    <ListItemText
-                      primary={message.text}
-                      sx={{
-                        textAlign: message.sender === loggedInID ? 'right' : 'left',
-                        maxWidth: '30%', // Limit the width of the message bubbles
-                        backgroundColor: message.sender === loggedInID ? '#DCF8C6' : '#EEE',
-                        borderRadius: '10px',
-                        padding: '8px 12px',
-                        marginBottom: 1,
-                        wordBreak: 'break-word',  // <-- Add this for word wrapping
-                        overflowWrap: 'break-word',
-                      }}
-                    />
-                  </Box>
-              </ListItem>
-              ))}
-          </List>
-          </Box>
-          <Divider /> {/* Visual separator */}
-          <Box sx={{ p: 2, display: 'flex', alignItems: 'center' }}> {/* Input area */}
-            <TextField
-              label="Type your message..."
-              variant="outlined"
-              fullWidth
-              onChange={(event) => setMessage(event.target.value)}
-              InputProps={{
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <IconButton color="primary" onClick={addMessageToChatSession}>
-                      <SendIcon />
-                    </IconButton>
-                  </InputAdornment>
-                ),
-              }}
-            />
-            <IconButton color="inherit" onClick={handleLogOut} >
-              <LogoutIcon />
-            </IconButton>
-          </Box>
+          ) : (
+            <>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', p: 2 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                  <Avatar alt="User Name" src="/path-to-avatar.jpg" /> 
+                  <Typography variant="h6" sx={{ ml: 2 }}>{randomUserName}</Typography>
+                </Box>
+                <Button variant="contained" color="primary" onClick={handleNextButtonClick}>
+                  Next
+                </Button>
+              </Box>
+              <Divider />
+              <Box sx={{ flex: 1, overflowY: 'auto', p: 2 }}> 
+                <List>
+                  {messages.map((message, index) => (
+                    <ListItem key={index} sx={{ display: 'block' }}> 
+                      <Box
+                        sx={{
+                          display: 'flex',
+                          justifyContent: message.sender === loggedInID ? 'flex-end' : 'flex-start',
+                          width: '100%',
+                        }}
+                      >
+                        <ListItemText
+                          primary={message.text}
+                          sx={{
+                            textAlign: message.sender === loggedInID ? 'right' : 'left',
+                            maxWidth: '30%', 
+                            backgroundColor: message.sender === loggedInID ? '#DCF8C6' : '#EEE',
+                            borderRadius: '10px',
+                            padding: '8px 12px',
+                            marginBottom: 1,
+                            wordBreak: 'break-word', 
+                            overflowWrap: 'break-word',
+                          }}
+                        />
+                      </Box>
+                    </ListItem>
+                  ))}
+                </List>
+              </Box>
+              <Divider />
+              <Box sx={{ p: 2, display: 'flex', alignItems: 'center' }}> 
+                <TextField
+                  label="Type your message..."
+                  variant="outlined"
+                  fullWidth
+                  onChange={(event) => setMessage(event.target.value)}
+                  value={message}
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton color="primary" onClick={addMessageToChatSession}>
+                          <SendIcon />
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                />
+                <IconButton color="inherit" onClick={handleLogOut} >
+                  <LogoutIcon />
+                </IconButton>
+              </Box>
+            </>
+          )}
         </>
       )}
-      </Box>     
+    </Box>
   );
 }
+
+// Codingislidh1!

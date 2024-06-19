@@ -76,7 +76,8 @@ export function SignUpPage() {
                     await setDoc(doc(db, "Users", user.uid), {
                         username: formData.username,
                         chatActive: false,
-                        online: false
+                        online: false,
+                        findingMatch: false
                     });
 
                     setTimeout(() => {
